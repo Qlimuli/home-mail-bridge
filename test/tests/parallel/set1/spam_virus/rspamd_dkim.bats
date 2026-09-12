@@ -1,0 +1,322 @@
+load "${REPOSITORY_ROOT}/test/helper/common"
+load "${REPOSITORY_ROOT}/test/helper/setup"
+
+BATS_TEST_NAME_PREFIX='[Rspamd] (DKIM) '
+CONTAINER_NAME='dms-test_rspamd-dkim'
+
+DOMAIN_NAME='example.test'
+SIGNING_CONF_FILE='/tmp/docker-mailserver/rspamd/override.d/dkim_signing.conf'
+SELECTOR_MAP_FILE='/tmp/docker-mailserver/rspamd/dkim_selectors.map'
+
+function setup_file() {
+  _init_with_defaults
+
+  # Comment for maintainers about `PERMIT_DOCKER=host`:
+  # https://github.com/docker-mailserver/docker-mailserver/pull/2815/files#r991087509
+  local CUSTOM_SETUP_ARGUMENTS=(
+    --env ENABLE_RSPAMD=1
+    --env ENABLE_OPENDKIM=0
+    --env ENABLE_OPENDMARC=0
+    --env ENABLE_POLICYD_SPF=0
+    --env LOG_LEVEL=trace
+    --env OVERRIDE_HOSTNAME="mail.${DOMAIN_NAME}"
+  )
+
+  _common_container_setup 'CUSTOM_SETUP_ARGUMENTS'
+  _wait_for_service rspamd-redis
+  _wait_for_service rspamd
+  _wait_for_rspamd_port_in_container
+}
+
+# We want each test to start with a clean state.
+function teardown() {
+  __remove_signing_config_file
+  __remove_selector_map
+  _run_in_container rm -rf /tmp/docker-mailserver/rspamd/dkim
+  assert_success
+}
+
+function teardown_file() { _default_teardown ; }
+
+@test 'log level is applied correctly' {
+  _run_in_container setup config dkim -vv help
+  __log_is_free_of_warnings_and_errors
+  assert_output --partial 'Enabled trace-logging'
+
+  _run_in_container setup config dkim -v help
+  __log_is_free_of_warnings_and_errors
+  assert_output --partial 'Enabled debug-logging'
+}
+
+@test 'help message is properly shown' {
+  _run_in_container setup config dkim help
+  __log_is_free_of_warnings_and_errors
+  assert_output --partial 'Showing usage message now'
+  assert_output --partial 'rspamd-dkim - Configure DKIM (DomainKeys Identified Mail)'
+}
+
+@test 'default signing config is created if it does not exist and not overwritten' {
+  # Required pre-condition: no default configuration is present
+  __remove_signing_config_file
+
+  __create_key
+  assert_success
+  __log_is_free_of_warnings_and_errors
+  assert_output --partial "Supplying a default configuration (to '${SIGNING_CONF_FILE}')"
+  refute_output --partial "'${SIGNING_CONF_FILE}' exists, not supplying a default"
+  assert_output --partial "Finished DKIM key creation"
+  __check_default_signing_config
+  __check_selector_map_entry "${DOMAIN_NAME}" 'mail'
+  _exec_in_container_bash "echo 'blabla' >${SIGNING_CONF_FILE}"
+  local INITIAL_SHA512_SUM=$(_exec_in_container sha512sum "${SIGNING_CONF_FILE}")
+
+  __create_key
+  assert_failure
+  assert_output --partial "Not overwriting existing files (use '--force' to overwrite existing files)"
+
+  # the same as before, but with the '--force' option
+  __create_key 'rsa' 'mail' "${DOMAIN_NAME}" '2048' '--force'
+  __log_is_free_of_warnings_and_errors
+  refute_output --partial "Supplying a default configuration ('${SIGNING_CONF_FILE}')"
+  assert_output --partial "Overwriting existing files as the '--force' option was supplied"
+  assert_output --partial "'${SIGNING_CONF_FILE}' exists, not supplying a default"
+  assert_output --partial "Finished DKIM key creation"
+  local SECOND_SHA512_SUM=$(_exec_in_container sha512sum "${SIGNING_CONF_FILE}")
+  assert_equal "${INITIAL_SHA512_SUM}" "${SECOND_SHA512_SUM}"
+}
+
+@test 'default directories and files are created' {
+  __create_key
+  assert_success
+
+  _count_files_in_directory_in_container /tmp/docker-mailserver/rspamd/dkim/ 3
+  _file_exists_in_container "${SIGNING_CONF_FILE}"
+  _file_exists_in_container "${SELECTOR_MAP_FILE}"
+}
+
+@test "argument 'domain' is applied correctly" {
+  local FIRST=1
+  for DOMAIN in 'blabla.org' 'someother.com' 'random.de'; do
+    _run_in_container setup config dkim domain "${DOMAIN}"
+    assert_success
+    assert_line --partial "Domain set to '${DOMAIN}'"
+    if [[ ${FIRST} -eq 1 ]]; then
+      assert_output --partial "Supplying a default configuration"
+      FIRST=0
+    else
+      assert_output --partial "exists, not supplying a default"
+    fi
+
+    __check_key_files_are_present "/tmp/docker-mailserver/rspamd/dkim/${DOMAIN}-mail"
+    __check_selector_map_entry "${DOMAIN}" 'mail'
+  done
+
+  __check_default_signing_config
+}
+
+@test "argument 'keytype' is applied correctly" {
+  _run_in_container setup config dkim keytype foobar
+  assert_failure
+  assert_line --partial "Unknown keytype 'foobar'"
+
+  for KEYTYPE in 'rsa' 'ed25519'; do
+    _run_in_container setup config dkim keytype "${KEYTYPE}"
+    assert_success
+    assert_line --partial "Keytype set to '${KEYTYPE}'"
+
+    local BASE_FILE_NAME="/tmp/docker-mailserver/rspamd/dkim/${DOMAIN_NAME}-mail"
+    __check_key_files_are_present "${BASE_FILE_NAME}"
+
+    _run_in_container grep ".*k=${KEYTYPE};.*" "${BASE_FILE_NAME}.public.txt"
+    assert_success
+    _run_in_container grep ".*k=${KEYTYPE};.*" "${BASE_FILE_NAME}.public.dns.txt"
+    assert_success
+    __remove_signing_config_file
+    _exec_in_container rm -f "${BASE_FILE_NAME}.public.txt"
+    _exec_in_container rm -f "${BASE_FILE_NAME}.public.dns.txt"
+    _exec_in_container rm -f "${BASE_FILE_NAME}.private"
+  done
+}
+
+@test "argument 'selector' is applied correctly" {
+  for SELECTOR in 'foo' 'bar' 'baz'; do
+    __create_key 'rsa' "${SELECTOR}"
+    assert_success
+    assert_line --partial "Selector set to '${SELECTOR}'"
+
+    local BASE_FILE_NAME="/tmp/docker-mailserver/rspamd/dkim/${DOMAIN_NAME}-${SELECTOR}"
+    __check_key_files_are_present "${BASE_FILE_NAME}"
+    _run_in_container grep "^${SELECTOR}\._domainkey.*" "${BASE_FILE_NAME}.public.txt"
+    assert_success
+
+    __check_rsa_keys 2048 "${DOMAIN_NAME}-${SELECTOR}"
+    __check_default_signing_config
+    __check_selector_map_entry "${DOMAIN_NAME}" "${SELECTOR}"
+    __remove_selector_map
+  done
+}
+
+@test "argument 'keysize' is applied correctly for RSA keys" {
+  for KEYSIZE in 1024 2048 4096; do
+    __create_key 'rsa' 'mail' "${DOMAIN_NAME}" "${KEYSIZE}"
+    assert_success
+    __log_is_free_of_warnings_and_errors
+    assert_line --partial "Keysize set to '${KEYSIZE}'"
+    __check_rsa_keys "${KEYSIZE}" "${DOMAIN_NAME}-mail"
+    __remove_signing_config_file
+    local BASE_FILE_NAME="/tmp/docker-mailserver/rspamd/dkim/${DOMAIN_NAME}-mail"
+    _exec_in_container rm -f "${BASE_FILE_NAME}.public.txt"
+    _exec_in_container rm -f "${BASE_FILE_NAME}.public.dns.txt"
+    _exec_in_container rm -f "${BASE_FILE_NAME}.private"
+  done
+}
+
+@test "when 'keytype=ed25519' is set, setting custom 'keysize' is rejected" {
+  __create_key 'ed25519' 'mail' "${DOMAIN_NAME}" 4096
+  assert_failure
+  assert_line --partial "Chosen keytype does not accept the 'keysize' argument"
+}
+
+@test "setting all arguments to a custom value works" {
+  local KEYTYPE='ed25519'
+  local SELECTOR='someselector'
+  local DOMAIN='dms.org'
+
+  __create_key "${KEYTYPE}" "${SELECTOR}" "${DOMAIN}"
+  assert_success
+  __log_is_free_of_warnings_and_errors
+
+  assert_line --partial "Keytype set to '${KEYTYPE}'"
+  assert_line --partial "Selector set to '${SELECTOR}'"
+  assert_line --partial "Domain set to '${DOMAIN}'"
+
+  __check_key_files_are_present "/tmp/docker-mailserver/rspamd/dkim/${DOMAIN}-${SELECTOR}"
+  __check_default_signing_config
+  __check_selector_map_entry "${DOMAIN}" "${SELECTOR}"
+}
+
+@test "same selector cannot hold both RSA and Ed25519 keys" {
+  __create_key 'rsa' 'mail'
+  assert_success
+  __create_key 'ed25519' 'mail'
+  assert_failure
+  assert_output --partial "Not overwriting existing files"
+}
+
+@test "RSA and Ed25519 keys coexist when selectors differ" {
+  __create_key 'rsa' 'mail'
+  assert_success
+  __create_key 'ed25519' 'mail-ed25519'
+  assert_success
+  assert_output --partial "replacing with 'mail-ed25519'"
+
+  __check_key_files_are_present "/tmp/docker-mailserver/rspamd/dkim/${DOMAIN_NAME}-mail"
+  __check_key_files_are_present "/tmp/docker-mailserver/rspamd/dkim/${DOMAIN_NAME}-mail-ed25519"
+  __check_default_signing_config
+  __check_selector_map_entry "${DOMAIN_NAME}" 'mail-ed25519'
+}
+
+# Create DKIM keys.
+#
+# @param ${1} = keytype (default: rsa)
+# @param ${2} = selector (default: mail)
+# @param ${3} = domain (default: ${DOMAIN})
+# @param ${4} = keysize (default: 2048)
+function __create_key() {
+  local KEYTYPE=${1:-rsa}
+  local SELECTOR=${2:-mail}
+  local DOMAIN=${3:-${DOMAIN_NAME}}
+  local KEYSIZE=${4:-2048}
+  local FORCE=${5:-}
+
+  # Not quoting is intended here as we would otherwise provide
+  # the argument "''" (empty string), which would cause errors
+  # shellcheck disable=SC2086
+  _run_in_container setup config dkim ${FORCE} \
+    keytype "${KEYTYPE}"   \
+    keysize "${KEYSIZE}"   \
+    selector "${SELECTOR}" \
+    domain "${DOMAIN}"
+}
+
+# Check whether an RSA key is created successfully and correctly
+# for a specific key size.
+#
+# @param ${1} = key size
+# @param ${2} = name of the selector and domain name (as one string)
+function __check_rsa_keys() {
+  local KEYSIZE=${1:?Keysize must be supplied to __check_rsa_keys}
+  local SELECTOR_AND_DOMAIN=${2:?Selector and domain name must be supplied to __check_rsa_keys}
+  local BASE_FILE_NAME="/tmp/docker-mailserver/rspamd/dkim/${SELECTOR_AND_DOMAIN}"
+
+  # Check the private key matches the specification
+  _run_in_container_bash "openssl rsa -in '${BASE_FILE_NAME}.private' -noout -text"
+  assert_success
+  assert_line --index 0 "Private-Key: (${KEYSIZE} bit, 2 primes)"
+
+  # Check the public key matches the specification
+  #
+  # We utilize the file for the DNS record contents which is already created
+  # by the Rspamd DKIM helper script. This makes parsing easier here.
+  local PUBKEY PUBKEY_INFO
+  PUBKEY=$(_exec_in_container_bash "grep -o 'p=.*' ${BASE_FILE_NAME}.public.dns.txt")
+  _run_in_container_bash "openssl enc -base64 -d <<< ${PUBKEY#p=} | openssl pkey -inform DER -pubin -noout -text"
+  assert_success
+  assert_line --index 0 "Public-Key: (${KEYSIZE} bit)"
+}
+
+# Verify that all DKIM key files are present.
+#
+# @param ${1} = base file name that all DKIM key files have
+function __check_key_files_are_present() {
+  local BASE_FILE_NAME="${1:?Base file name must be supplied to __check_key_files_are_present}"
+  for FILE in ${BASE_FILE_NAME}.{public.txt,public.dns.txt,private}; do
+    _file_exists_in_container "${FILE}"
+  done
+}
+
+# Check the generated default signing config uses the path template.
+function __check_default_signing_config() {
+  _file_exists_in_container "${SIGNING_CONF_FILE}"
+  _run_in_container grep -F 'try_fallback = true;' "${SIGNING_CONF_FILE}"
+  assert_success
+  _run_in_container grep -F 'selector = "mail";' "${SIGNING_CONF_FILE}"
+  assert_success
+  _run_in_container grep -F 'selector_map = "/tmp/docker-mailserver/rspamd/dkim_selectors.map";' "${SIGNING_CONF_FILE}"
+  assert_success
+  # shellcheck disable=SC2016
+  _run_in_container grep -F 'path = "/tmp/docker-mailserver/rspamd/dkim/$domain-$selector.private";' "${SIGNING_CONF_FILE}"
+  assert_success
+}
+
+# Check whether DOMAIN maps to SELECTOR in the persisted selector map.
+#
+# @param ${1} = domain
+# @param ${2} = selector
+function __check_selector_map_entry() {
+  local DOMAIN=${1:?Domain must be supplied to __check_selector_map_entry}
+  local SELECTOR=${2:?Selector must be supplied to __check_selector_map_entry}
+  _file_exists_in_container "${SELECTOR_MAP_FILE}"
+  # shellcheck disable=SC2016
+  _run_in_container awk -v domain="${DOMAIN}" -v selector="${SELECTOR}" \
+    '$1 == domain && $2 == selector { found = 1 } END { exit found ? 0 : 1 }' \
+    "${SELECTOR_MAP_FILE}"
+  assert_success
+}
+
+# Check whether the script output is free of warnings and errors.
+function __log_is_free_of_warnings_and_errors() {
+  assert_success
+  refute_output --partial '[  WARN   ]'
+  refute_output --partial '[  ERROR  ]'
+}
+
+# Remove the signing configuration file inside the container.
+function __remove_signing_config_file() {
+  _exec_in_container rm -f "${SIGNING_CONF_FILE}"
+}
+
+# Remove the persisted selector map inside the container.
+function __remove_selector_map() {
+  _exec_in_container rm -f "${SELECTOR_MAP_FILE}"
+}
