@@ -50,8 +50,13 @@ EXEC_CMD = os.environ.get("DMS_EXEC_CMD", _EXEC_DEFAULT).strip()
 # Optionaler Auth-Token (wenn gesetzt, muss der Header X-Auth-Token stimmen)
 AUTH_TOKEN = os.environ.get("DMS_GUI_TOKEN", "")
 
-# Timeout für subprocess-Aufrufe (Sekunden)
-CMD_TIMEOUT = 60
+# Timeout für subprocess-Aufrufe (Sekunden) – bewusst hoch, damit langsame Hosts
+# nicht abbrechen; per DMS_GUI_CMD_TIMEOUT überschreibbar
+CMD_TIMEOUT = int(os.environ.get("DMS_GUI_CMD_TIMEOUT", "180"))
+
+# Dashboard-Cache (Sekunden) – vermeidet ständige docker-exec-Last
+DASH_CACHE_TTL = int(os.environ.get("DMS_GUI_DASH_CACHE", "45"))
+_dash_cache: dict = {"ts": 0.0, "data": None}
 
 # Erlaubte Config-Dateien (relativ zu /tmp/docker-mailserver/)
 ALLOWED_CONFIG_FILES = {
@@ -387,11 +392,86 @@ table.data th, table.data td {
   border-bottom: 1px solid var(--border);
 }
 table.data th { color: var(--muted); font-weight: 500; }
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.dash-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem;
+  text-align: center;
+}
+.dash-card .value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+.dash-card .label {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dash-card.ok .value { color: var(--success); }
+.dash-card.warn .value { color: var(--warning); }
+.dash-card.err .value { color: var(--danger); }
+.svc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.6rem;
+}
+.svc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.svc-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.svc-dot.run { background: var(--success); box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+.svc-dot.stop { background: var(--danger); }
+.svc-dot.unk { background: var(--muted); }
+.quick-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.quick-links a {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.quick-links a:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+  background: var(--border);
+}
 """
 
 
 def page_shell(title: str, body: str, active: str = "") -> str:
     groups = {
+        "Übersicht": [
+            ("dashboard", "Dashboard"),
+        ],
         "Konten": [
             ("email", "E-Mail-Konten"),
             ("alias", "Aliase"),
@@ -471,6 +551,279 @@ def render_result(rc: int, stdout: str, stderr: str) -> str:
       <h3>Ergebnis {badge}</h3>
       <div class="output {cls}">{content}</div>
     </div>"""
+
+
+# ---------------------------------------------------------------------------
+# Dashboard – Status & Übersicht (Synology-ähnlich, ressourcenschonend)
+# ---------------------------------------------------------------------------
+# Ein einziger leichter Shell-Schnipsel im Container statt vieler docker exec.
+# Keine schweren Log-Scans standardmäßig. Ergebnis wird kurz gecacht.
+_DASH_SCRIPT = r"""
+set +e
+echo "===SERVICES==="
+supervisorctl status 2>/dev/null || echo "ERR supervisorctl"
+echo "===ACCOUNTS==="
+# schnell: Zeilen in accounts-Datei (kein setup email list)
+if [ -f /tmp/docker-mailserver/postfix-accounts.cf ]; then
+  grep -cve '^[[:space:]]*$' /tmp/docker-mailserver/postfix-accounts.cf 2>/dev/null || echo 0
+elif [ -f /etc/postfix/vmailbox ]; then
+  grep -cve '^[[:space:]]*$' /etc/postfix/vmailbox 2>/dev/null || echo 0
+else
+  echo 0
+fi
+echo "===ALIASES==="
+if [ -f /tmp/docker-mailserver/postfix-virtual.cf ]; then
+  grep -cve '^[[:space:]]*$' /tmp/docker-mailserver/postfix-virtual.cf 2>/dev/null || echo 0
+elif [ -f /etc/postfix/virtual ]; then
+  grep -cve '^[[:space:]]*$' /etc/postfix/virtual 2>/dev/null || echo 0
+else
+  echo 0
+fi
+echo "===QUEUE==="
+# nur Summary-Zeile, kein voller Dump
+postqueue -p 2>/dev/null | tail -n 1
+echo "===STORAGE==="
+# du -s ist leichter als -sh auf großen Bäumen; Ausgabe in KB
+du -s /var/mail 2>/dev/null | awk '{printf "%.1fM\n", $1/1024}'
+echo "===END==="
+"""
+
+
+def _parse_dash_output(out: str) -> dict:
+    data: dict = {
+        "services": [],
+        "accounts": "–",
+        "aliases": "–",
+        "queue": "–",
+        "mail_storage": "–",
+        "sent_approx": "–",
+        "recv_approx": "–",
+        "cached": False,
+        "error": None,
+    }
+    section = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal section, buf
+        text = "\n".join(buf).strip()
+        if section == "SERVICES":
+            if text.startswith("ERR"):
+                data["error"] = text[:200]
+            else:
+                for line in text.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        name, state = parts[0], parts[1]
+                        data["services"].append({
+                            "name": name,
+                            "state": state,
+                            "running": state == "RUNNING",
+                        })
+        elif section == "ACCOUNTS":
+            data["accounts"] = text.splitlines()[-1].strip() if text else "0"
+        elif section == "ALIASES":
+            data["aliases"] = text.splitlines()[-1].strip() if text else "0"
+        elif section == "QUEUE":
+            if not text or "empty" in text.lower():
+                data["queue"] = "0"
+            else:
+                m = re.search(r"(\d+)\s+Request", text, re.I)
+                data["queue"] = m.group(1) if m else text[:40]
+        elif section == "STORAGE":
+            data["mail_storage"] = text.splitlines()[-1].strip() if text else "–"
+        section = None
+        buf = []
+
+    for line in out.splitlines():
+        if line.startswith("===") and line.endswith("==="):
+            flush()
+            section = line.strip("=")
+            if section == "END":
+                break
+            buf = []
+        else:
+            buf.append(line)
+    flush()
+    return data
+
+
+def _gather_dashboard(force: bool = False) -> dict:
+    """Ein docker-exec + Cache. Sehr leicht, hoher Timeout."""
+    now = time.time()
+    if (
+        not force
+        and _dash_cache["data"] is not None
+        and (now - _dash_cache["ts"]) < DASH_CACHE_TTL
+    ):
+        d = dict(_dash_cache["data"])
+        d["cached"] = True
+        return d
+
+    rc, out, err = run_exec(["sh", "-c", _DASH_SCRIPT])
+    if rc != 0 and not out.strip():
+        data = {
+            "services": [],
+            "accounts": "–",
+            "aliases": "–",
+            "queue": "–",
+            "mail_storage": "–",
+            "sent_approx": "–",
+            "recv_approx": "–",
+            "cached": False,
+            "error": (err or out or f"rc={rc}")[:300],
+        }
+    else:
+        data = _parse_dash_output(out)
+        if data.get("error") is None and err.strip():
+            # nicht-fatal
+            pass
+
+    _dash_cache["ts"] = now
+    _dash_cache["data"] = data
+    return dict(data)
+
+
+def _gather_mail_stats() -> tuple[str, str]:
+    """Optionale, leichte Log-Zählung (nur auf Knopfdruck)."""
+    script = (
+        "S=$(tail -n 2000 /var/log/mail/mail.log 2>/dev/null | grep -c 'status=sent' || echo 0); "
+        "R=$(tail -n 2000 /var/log/mail/mail.log 2>/dev/null | grep -cE 'lmtp.*status=sent|Saved\\)' || echo 0); "
+        "echo \"$S $R\""
+    )
+    rc, out, _ = run_exec(["sh", "-c", script])
+    if rc != 0 or not out.strip():
+        return "–", "–"
+    parts = out.strip().split()
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return "–", "–"
+
+
+def page_dashboard(result: str = "", force_refresh: bool = False, with_stats: bool = False) -> str:
+    d = _gather_dashboard(force=force_refresh)
+    if with_stats:
+        sent, recv = _gather_mail_stats()
+        d["sent_approx"] = sent
+        d["recv_approx"] = recv
+
+    running_n = sum(1 for s in d["services"] if s["running"])
+    total_n = len(d["services"])
+    svc_class = "ok" if total_n and running_n == total_n else ("warn" if running_n else "err")
+    cache_note = (
+        f'<span class="badge badge-ok">Cache {DASH_CACHE_TTL}s</span>'
+        if d.get("cached")
+        else '<span class="badge">frisch</span>'
+    )
+
+    cards = f"""
+    <div class="dash-grid">
+      <div class="dash-card {svc_class}">
+        <div class="value">{running_n}/{total_n or '–'}</div>
+        <div class="label">Services aktiv</div>
+      </div>
+      <div class="dash-card">
+        <div class="value">{html.escape(str(d['accounts']))}</div>
+        <div class="label">E-Mail-Konten</div>
+      </div>
+      <div class="dash-card">
+        <div class="value">{html.escape(str(d['aliases']))}</div>
+        <div class="label">Aliase</div>
+      </div>
+      <div class="dash-card {'warn' if d['queue'] not in ('0', '–') else ''}">
+        <div class="value">{html.escape(str(d['queue']))}</div>
+        <div class="label">Warteschlange</div>
+      </div>
+      <div class="dash-card">
+        <div class="value">{html.escape(str(d['mail_storage']))}</div>
+        <div class="label">Mail-Speicher</div>
+      </div>
+      <div class="dash-card">
+        <div class="value">{html.escape(str(d['sent_approx']))}</div>
+        <div class="label">≈ Gesendet*</div>
+      </div>
+      <div class="dash-card">
+        <div class="value">{html.escape(str(d['recv_approx']))}</div>
+        <div class="label">≈ Empfangen*</div>
+      </div>
+    </div>
+    <p class="note">* Mail-Zählung nur auf Anfrage (letzte ~2000 Log-Zeilen), nicht bei jedem Laden.
+      Status wird {DASH_CACHE_TTL}s gecacht. Timeout pro Befehl: {CMD_TIMEOUT}s. {cache_note}</p>
+    """
+
+    svc_html = ""
+    if d["services"]:
+        for s in d["services"]:
+            dot = "run" if s["running"] else "stop"
+            svc_html += (
+                f'<div class="svc-item">'
+                f'<span class="svc-dot {dot}"></span>'
+                f'<span>{html.escape(s["name"])}</span>'
+                f'<span style="margin-left:auto;color:var(--muted);font-size:0.8rem">'
+                f'{html.escape(s["state"])}</span></div>'
+            )
+    else:
+        err = html.escape(d.get("error") or "Keine Service-Daten")
+        svc_html = f'<p class="note">{err}</p>'
+
+    body = f"""
+    <h2>Dashboard</h2>
+    <p class="desc">Übersicht wie bei einem Mail-Server-Admin-Panel (Synology-ähnlich).
+      Ressourcenschonend: ein leichter Abfrage-Lauf, Cache, keine schweren Log-Scans
+      standardmäßig. Alle Funktionen links konfigurierbar.</p>
+
+    {cards}
+
+    <div class="card">
+      <h3>Service-Status</h3>
+      <div class="svc-grid">{svc_html}</div>
+      <div class="actions" style="margin-top:1rem">
+        <form method="post" action="/action" style="display:inline">
+          <input type="hidden" name="action" value="dash_refresh">
+          <button class="btn btn-secondary btn-sm" type="submit">Status aktualisieren</button>
+        </form>
+        <form method="post" action="/action" style="display:inline">
+          <input type="hidden" name="action" value="dash_stats">
+          <button class="btn btn-secondary btn-sm" type="submit">Mail-Statistik laden</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Schnellzugriff – alle Funktionen</h3>
+      <div class="quick-links">
+        <a href="/?page=email">E-Mail-Konten</a>
+        <a href="/?page=alias">Aliase</a>
+        <a href="/?page=quota">Quota</a>
+        <a href="/?page=dovecot-master">Dovecot-Master</a>
+        <a href="/?page=dkim">DKIM</a>
+        <a href="/?page=relay">Relay</a>
+        <a href="/?page=fail2ban">Fail2Ban</a>
+        <a href="/?page=config">Config anzeigen</a>
+        <a href="/?page=mails">Mails / Mailboxen</a>
+        <a href="/?page=logs">Logs</a>
+        <a href="/?page=debug">Debug</a>
+        <a href="/?page=settings">Einstellungen</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Was du hier konfigurieren kannst</h3>
+      <ul style="margin-left:1.2rem;color:var(--muted);font-size:0.9rem;line-height:1.7">
+        <li><strong style="color:var(--text)">Konten:</strong> anlegen, Passwort ändern, löschen, Listen, Send-/Receive-Beschränkungen</li>
+        <li><strong style="color:var(--text)">Aliase &amp; Quota:</strong> Weiterleitungen und Speicherlimits</li>
+        <li><strong style="color:var(--text)">Dovecot-Master:</strong> Master-User für Admin-Zugriff auf Mailboxen</li>
+        <li><strong style="color:var(--text)">DKIM:</strong> Schlüssel erzeugen / anzeigen</li>
+        <li><strong style="color:var(--text)">Relay:</strong> Relay-Hosts, Auth und Ausschlüsse</li>
+        <li><strong style="color:var(--text)">Fail2Ban:</strong> Status, Bans, Unban</li>
+        <li><strong style="color:var(--text)">Einsicht:</strong> Config-Dateien, Mailbox-Inhalt, Speicher, Logs (nur lesend)</li>
+      </ul>
+      <p class="note">Die GUI ruft nur bestehende <code>setup</code>- und read-only-Befehle auf –
+        docker-mailserver selbst bleibt unverändert.</p>
+    </div>
+    {result}
+    """
+    return page_shell("Dashboard", body, active="dashboard")
 
 
 # ---------------------------------------------------------------------------
@@ -1180,12 +1533,15 @@ SETUP_CMD     = {html.escape(SETUP_CMD)}
 EXEC_CMD      = {html.escape(EXEC_CMD)}
 AUTH_TOKEN    = {"gesetzt" if AUTH_TOKEN else "(nicht gesetzt)"}
 CMD_TIMEOUT   = {CMD_TIMEOUT}s
+DASH_CACHE_TTL= {DASH_CACHE_TTL}s
           </div>
           <p class="note">
             Umgebungsvariablen:<br>
             <code>DMS_GUI_HOST</code>, <code>DMS_GUI_PORT</code>,
             <code>DMS_SETUP_CMD</code>, <code>DMS_EXEC_CMD</code>,
-            <code>DMS_GUI_TOKEN</code>
+            <code>DMS_GUI_TOKEN</code>,
+            <code>DMS_GUI_CMD_TIMEOUT</code> (Standard 180),
+            <code>DMS_GUI_DASH_CACHE</code> (Standard 45)
           </p>
         </div>
 
@@ -1483,6 +1839,12 @@ def handle_action(form: dict) -> tuple[str, str]:
         use_exec = True
         args = ["ls", "-la", "/var/log/mail/"]
 
+    elif action == "dash_refresh":
+        return "dashboard", {"force_refresh": True}
+
+    elif action == "dash_stats":
+        return "dashboard", {"force_refresh": True, "with_stats": True}
+
     else:
         return "email", render_result(1, "", f"Unbekannte Aktion: {action}")
 
@@ -1506,6 +1868,7 @@ def handle_action(form: dict) -> tuple[str, str]:
 # HTTP-Handler
 # ---------------------------------------------------------------------------
 RENDERERS = {
+    "dashboard": page_dashboard,
     "email": page_email,
     "alias": page_alias,
     "quota": page_quota,
@@ -1573,8 +1936,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         qs = parse_qs(parsed.query)
-        page = (qs.get("page") or ["email"])[0]
-        fn = RENDERERS.get(page, page_email)
+        page = (qs.get("page") or ["dashboard"])[0]
+        fn = RENDERERS.get(page, page_dashboard)
         self._send(200, fn())
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1606,8 +1969,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         page, result = handle_action(form)
-        fn = RENDERERS.get(page, page_email)
-        self._send(200, fn(result))
+        fn = RENDERERS.get(page, page_dashboard)
+        if isinstance(result, dict):
+            # Dashboard-Optionen (force_refresh / with_stats)
+            self._send(200, fn(**result))
+        else:
+            self._send(200, fn(result))
 
 
 def main() -> None:

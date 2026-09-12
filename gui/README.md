@@ -2,6 +2,12 @@
 
 Web-Oberfläche für docker-mailserver. Läuft als optionaler Service neben dem Mailserver.
 
+**Dashboard** (Startseite, Synology-MailPlus-ähnlich): Service-Status, Konten/Aliase,
+Warteschlange, Speicher, optional Mail-Zählung, Schnellzugriff auf alle Funktionen.
+
+**Performance:** ein leichter Abfrage-Lauf im Container (kein Setup-List, keine schweren
+Log-Scans standardmäßig), 45s Cache, Timeout 180s – ressourcenschonend auch auf schwachen Hosts.
+
 ## Start mit dem Haupt-Compose
 
 Im Projektverzeichnis:
@@ -24,6 +30,8 @@ GUI erreichbar unter: **http://\<host\>:18880/**
 | `DMS_SETUP_CMD` | `docker exec -i mailserver setup` | setup-CLI |
 | `DMS_EXEC_CMD` | `docker exec -i mailserver` | read-only Befehle |
 | `DMS_GUI_PORT` | `18880` | Port im Container |
+| `DMS_GUI_CMD_TIMEOUT` | `180` | Timeout pro Befehl (Sekunden) |
+| `DMS_GUI_DASH_CACHE` | `45` | Dashboard-Cache (Sekunden) |
 
 ## Sicherheit
 
