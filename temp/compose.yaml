@@ -1,0 +1,46 @@
+services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: mailserver
+    hostname: mailserver.local
+    env_file: mailserver.env
+    ports:
+      - "993:993"
+      - "587:587"
+    volumes:
+      - /volume1/docker/docker-mailserver-master/docker-data/dms/mail-data/:/var/mail/
+      - /volume1/docker/docker-mailserver-master/docker-data/dms/mail-state/:/var/mail-state/
+      - /volume1/docker/docker-mailserver-master/docker-data/dms/mail-logs/:/var/log/mail/
+      - /volume1/docker/docker-mailserver-master/docker-data/dms/config/:/tmp/docker-mailserver/
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    stop_grace_period: 1m
+
+  # ------------------------------------------------------------------
+  # Administration GUI (optional) – ändert nichts an der DMS-Funktionalität
+  # Start: docker compose up -d
+  # GUI:   http://<host>:18880/
+  # Token: DMS_GUI_TOKEN in .env oder Umgebung setzen (empfohlen)
+  # ------------------------------------------------------------------
+  dms-gui:
+    build:
+      context: ./gui
+      dockerfile: Dockerfile
+    image: dms-gui:local
+    container_name: dms-gui
+    restart: unless-stopped
+    ports:
+      - "18880:18880"
+    environment:
+      - DMS_GUI_HOST=0.0.0.0
+      - DMS_GUI_PORT=18880
+      # Container-Name muss zu mailserver.container_name passen
+      - DMS_SETUP_CMD=docker exec -i mailserver setup
+      - DMS_EXEC_CMD=docker exec -i mailserver
+      # Token aus .env / Umgebung (leer = ohne Login – nur in vertrauenswürdigen Netzen)
+      - DMS_GUI_TOKEN=${DMS_GUI_TOKEN:-}
+    volumes:
+      # Docker-Socket nur lesend – nötig für docker exec in den Mailserver-Container
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - mailserver
