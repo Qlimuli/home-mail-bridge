@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Home-Mail-Bridge{% endblock %}
+
+{% block header_status %}
+  <span><span class="dot {{ 'ok' if dovecot_status == 'running' else 'err' }}"></span>Dovecot: {{ dovecot_status }}</span>
+  <span><span class="dot {{ 'ok' if sync_status == 'running' else 'err' }}"></span>Sync: {{ sync_status }}</span>
+{% endblock %}
+
+{% block content %}
+
+<div class="card">
+  <h2>Neuen Benutzer anlegen</h2>
+  <form method="post" action="{{ url_for('user_add') }}">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Benutzername (lokal für IMAP)</label>
+        <input name="username" required placeholder="Max.Mustermann" pattern="[A-Za-z0-9._-]+" title="Groß-/Kleinschreibung wird beibehalten">
+      </div>
+      <div class="form-group">
+        <label>Passwort (für Mail-Apps)</label>
+        <input name="password" type="password" required minlength="10" placeholder="mind. 10 Zeichen (wird bcrypt-gehasht)">
+      </div>
+      <div class="form-group">
+        <button type="submit" class="btn btn-ok">Anlegen</button>
+      </div>
+    </div>
+    <p class="muted">Beim Anlegen wird automatisch <code>{{ homes_base }}/&lt;user&gt;/.Maildir</code> geprüft bzw. angelegt. Bestehende .Maildir vom alten Synology Mail Server werden 1:1 übernommen.</p>
+  </form>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+    <h2 style="margin:0">Benutzer &amp; verbundene Konten</h2>
+    <form method="post" action="{{ url_for('sync_now') }}" class="inline">
+      <button type="submit" class="btn btn-sm">Sync jetzt anstoßen</button>
+    </form>
+  </div>
+
+  {% if not users %}
+    <p class="muted">Noch keine Benutzer angelegt.</p>
+  {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>Benutzer</th>
+          <th>.Maildir</th>
+          <th>Externe Konten (Gmail / GMX …)</th>
+          <th>Aktionen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>
+            <strong>{{ u.username }}</strong><br>
+            <span class="muted">IMAP-Login: {{ u.username }}</span>
+          </td>
+          <td>
+            {{ u.maildir_existing or "unbekannt" }}
+            <form method="post" action="{{ url_for('migrate', username=u.username) }}" class="inline" style="margin-top:0.3rem">
+              <button type="submit" class="btn btn-sm" style="background:#475569">Prüfen / migrieren</button>
+            </form>
+          </td>
+          <td>
+            {% if u.accounts %}
+              <div class="account-list">
+                {% for acc in u.accounts %}
+                <div class="account-item">
+                  <span>{{ acc.label }} → {{ acc.remote_user }}@{{ acc.host }}
+                    {% if acc.has_password %}<span class="muted" title="Credentials verschlüsselt gespeichert">🔒</span>{% endif %}
+                  </span>
+                  <form method="post" action="{{ url_for('account_delete', username=u.username, idx=loop.index0) }}" class="inline">
+                    <button type="submit" class="btn btn-sm btn-danger">×</button>
+                  </form>
+                </div>
+                {% endfor %}
+              </div>
+            {% else %}
+              <span class="muted">noch keines</span>
+            {% endif %}
+
+            <details style="margin-top:0.6rem">
+              <summary class="muted" style="cursor:pointer">+ Gmail / GMX / Custom verbinden</summary>
+              <form method="post" action="{{ url_for('account_add', username=u.username) }}" style="margin-top:0.75rem">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Provider</label>
+                    <select name="provider" id="provider-{{ u.username }}" onchange="fillPreset(this, '{{ u.username }}')">
+                      {% for key, p in providers.items() %}
+                        <option value="{{ key }}">{{ p.name }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label>Bezeichnung</label>
+                    <input name="label" placeholder="z.B. privat">
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>IMAP-Host</label>
+                    <input name="host" id="host-{{ u.username }}" value="imap.gmail.com">
+                  </div>
+                  <div class="form-group">
+                    <label>Port</label>
+                    <input name="port" id="port-{{ u.username }}" value="993" type="number">
+                  </div>
+                  <div class="form-group">
+                    <label>SSL</label>
+                    <select name="ssl" id="ssl-{{ u.username }}">
+                      <option value="IMAPS">IMAPS</option>
+                      <option value="STARTTLS">STARTTLS</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>Remote-Benutzer (E-Mail)</label>
+                    <input name="remote_user" required placeholder="name@gmail.com">
+                  </div>
+                  <div class="form-group">
+                    <label>Passwort / App-Passwort</label>
+                    <input name="remote_pass" type="password" required>
+                  </div>
+                  <div class="form-group">
+                    <button type="submit" class="btn">Verbinden</button>
+                  </div>
+                </div>
+                <p class="muted" id="note-{{ u.username }}">Gmail: App-Passwort erforderlich (Konto → Sicherheit → 2-Schritt-Bestätigung → App-Passwörter).</p>
+              </form>
+            </details>
+          </td>
+          <td>
+            <details style="margin-bottom:0.4rem">
+              <summary class="muted" style="cursor:pointer;font-size:0.85rem">Passwort ändern</summary>
+              <form method="post" action="{{ url_for('user_password', username=u.username) }}" style="margin-top:0.4rem">
+                <input name="password" type="password" required minlength="10" placeholder="neues Passwort (min. 10)" style="width:100%;margin-bottom:0.3rem">
+                <button type="submit" class="btn btn-sm">Speichern</button>
+              </form>
+            </details>
+            <form method="post" action="{{ url_for('user_delete', username=u.username) }}" class="inline" onsubmit="return confirm('Benutzer wirklich löschen? Home bleibt erhalten.');">
+              <button type="submit" class="btn btn-sm btn-danger">Löschen</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Mail-Apps verbinden</h2>
+  <p class="muted" style="margin-bottom:0.75rem">
+    In Thunderbird, Apple Mail, Outlook, Android/iOS Mail usw. einfach ein neues IMAP-Konto anlegen:
+  </p>
+  <ul class="muted" style="padding-left:1.25rem">
+    <li><strong>IMAP-Server:</strong> IP oder Hostname deiner Synology (Port 993, SSL/TLS)</li>
+    <li><strong>Benutzername:</strong> der lokale Benutzername von oben</li>
+    <li><strong>Passwort:</strong> das hier vergebene Passwort</li>
+    <li><strong>SMTP:</strong> am besten direkt den Provider nutzen (smtp.gmail.com / mail.gmx.net) – spart Ressourcen auf dem NAS</li>
+  </ul>
+</div>
+
+<script>
+const presets = {{ providers | tojson }};
+function fillPreset(sel, user) {
+  const p = presets[sel.value] || presets.custom;
+  document.getElementById('host-' + user).value = p.host || '';
+  document.getElementById('port-' + user).value = p.port || 993;
+  document.getElementById('ssl-' + user).value = p.ssl || 'IMAPS';
+  document.getElementById('note-' + user).textContent = p.note || '';
+}
+</script>
+{% endblock %}

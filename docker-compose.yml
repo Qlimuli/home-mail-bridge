@@ -1,0 +1,89 @@
+# Home-Mail-Bridge – extrem leichtes Deployment für Synology DS220j (und ähnliche schwache NAS)
+# Primärzweck: Pro User echte Gmail-/GMX-Konten per mbsync in die Home-.Maildir holen
+# + Dovecot IMAP, damit Mail-Apps (Thunderbird, Apple Mail, Android, iOS …) zugreifen können.
+# Alles per GUI konfigurierbar. Bestehende .Maildir vom alten Synology Mail Server werden übernommen.
+#
+# Sicherheit:
+# - Lokale IMAP-Passwörter: bcrypt (BLF-CRYPT), nie Klartext
+# - Provider-Credentials: Fernet-verschlüsselt (MASTER_KEY)
+# - Config-Dateien: mode 0600
+# - GUI nur mit starkem GUI_TOKEN erreichbar
+#
+# Hinweis DS220j: Keine "cpus:" Limits – der Kernel unterstützt kein CPU CFS Scheduling.
+
+services:
+  dovecot:
+    image: dovecot/dovecot:latest   # offizielles Image, multi-arch (arm64/amd64)
+    container_name: home-mail-dovecot
+    restart: unless-stopped
+    hostname: mail
+    ports:
+      - "143:143"     # IMAP (STARTTLS)
+      - "993:993"     # IMAPS
+      - "110:110"     # POP3 (optional)
+      - "995:995"     # POP3S
+    volumes:
+      - ./config/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./config/dovecot:/etc/dovecot/conf.d:ro
+      - ./config/users:/etc/dovecot/users:ro
+      - ./data/dovecot-ssl:/etc/dovecot/ssl
+      # WICHTIG: Homes der Synology-User mounten
+      # Passe den Pfad an, falls dein Volume anders heißt (z. B. /volume2/homes)
+      - /volume1/homes:/homes:rw
+    environment:
+      - TZ=Europe/Berlin
+    # Nur RAM-Limit (cpus: funktioniert auf DS220j-Kernel nicht)
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "doveadm", "service", "status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  sync:
+    build: ./sync
+    container_name: home-mail-sync
+    restart: unless-stopped
+    volumes:
+      - ./config/mbsync:/config:rw          # enthält .mbsyncrc mit temporär entschlüsselten Passwörtern → 0600
+      - ./config/users:/users:ro
+      - /volume1/homes:/homes:rw
+      - ./data/sync-state:/state
+    environment:
+      - TZ=Europe/Berlin
+      - SYNC_INTERVAL=300          # alle 5 Minuten (anpassbar)
+      - HOMES_BASE=/homes
+    mem_limit: 96m
+    depends_on:
+      - dovecot
+
+  gui:
+    build: ./gui
+    container_name: home-mail-gui
+    restart: unless-stopped
+    ports:
+      - "18880:18880"
+    volumes:
+      - ./config:/config:rw
+      - ./data:/data:rw
+      - /volume1/homes:/homes:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # nur für Status-Anzeige (optional)
+    environment:
+      - TZ=Europe/Berlin
+      - GUI_PORT=18880
+      # === SICHERHEIT – unbedingt setzen ===
+      - GUI_TOKEN=                  # Langer zufälliger Token (mind. 32 Zeichen) – Pflicht für Produktion
+      - GUI_SECRET=                 # Optional: fester Session-Key (sonst wird einer generiert)
+      - MASTER_KEY=                 # Optional: 64-Zeichen-Hex (32 Byte) für Fernet. Leer = auto in data/master.key
+      - HOMES_BASE=/homes
+      - DOVECOT_CONTAINER=home-mail-dovecot
+      - SYNC_CONTAINER=home-mail-sync
+    mem_limit: 96m                 # etwas höher wegen cryptography
+    depends_on:
+      - dovecot
+      - sync
+
+networks:
+  default:
+    name: home-mail-net

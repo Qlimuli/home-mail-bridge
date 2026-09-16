@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Home-Mail-Bridge{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --ok: #22c55e;
+      --err: #ef4444;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 600; }
+    header .status { display: flex; gap: 1rem; font-size: 0.875rem; color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 0.35rem; }
+    .dot.ok { background: var(--ok); }
+    .dot.err { background: var(--err); }
+    .dot.warn { background: var(--warn); }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    .card h2 { font-size: 1.05rem; margin-bottom: 1rem; color: var(--muted); font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    tr:last-child td { border-bottom: none; }
+    .btn {
+      display: inline-block;
+      padding: 0.4rem 0.85rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.85rem;
+      text-decoration: none;
+      color: #fff;
+      background: var(--accent);
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn-danger { background: var(--err); }
+    .btn-ok { background: var(--ok); }
+    .btn-sm { padding: 0.25rem 0.55rem; font-size: 0.8rem; }
+    form.inline { display: inline; }
+    input, select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.45rem 0.65rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      width: 100%;
+      max-width: 280px;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+    .form-row { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.85rem; align-items: flex-end; }
+    .form-group { flex: 1; min-width: 140px; }
+    .flash { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+    .flash.ok { background: rgba(34,197,94,0.15); border: 1px solid var(--ok); }
+    .flash.error { background: rgba(239,68,68,0.15); border: 1px solid var(--err); }
+    .muted { color: var(--muted); font-size: 0.85rem; }
+    .account-list { margin-top: 0.5rem; padding-left: 0.5rem; border-left: 2px solid var(--border); }
+    .account-item { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0; font-size: 0.85rem; }
+    footer { text-align: center; padding: 1.5rem; color: var(--muted); font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📬 Home-Mail-Bridge</h1>
+    <div class="status">
+      {% block header_status %}{% endblock %}
+      {% if session.get('token') %}
+        <a href="{{ url_for('logout') }}" class="btn btn-sm" style="background:#475569">Logout</a>
+      {% endif %}
+    </div>
+  </header>
+  <main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+        <div class="flash {{ cat }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    Optimiert für Synology DS220j · Mails liegen in den echten Homelaufwerken · Bestehende .Maildir werden übernommen
+  </footer>
+</body>
+</html>

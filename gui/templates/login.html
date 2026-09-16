@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Login – Home-Mail-Bridge{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width:400px;margin:3rem auto">
+  <h2>Anmeldung</h2>
+  <form method="post">
+    <div class="form-group" style="margin-bottom:1rem">
+      <label>GUI-Token</label>
+      <input name="token" type="password" required autofocus placeholder="Token aus .env / Compose">
+    </div>
+    <button type="submit" class="btn" style="width:100%">Einloggen</button>
+  </form>
+  <p class="muted" style="margin-top:1rem">
+    Token wird in der docker-compose.yml bzw. .env als <code>GUI_TOKEN</code> gesetzt.
+  </p>
+</div>
+{% endblock %}
