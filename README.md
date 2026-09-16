@@ -18,6 +18,7 @@
 - Synology DSM 7.x mit **Container Manager** (Docker)
 - User-Home-Service aktiviert (Control Panel → Benutzer & Gruppe → Erweitert)
 - Ports 143/993 (IMAP) und optional 110/995 (POP3) sowie 18880 (GUI) freigeben
+- Für die K8s-Mail-App ohne TLS: IMAP-Port 143 verwenden und TLS/SSL deaktivieren. Port 143 akzeptiert Plain IMAP sowie STARTTLS; Port 993 bleibt für TLS-Clients verfügbar.
 - Für Gmail: App-Passwort (2FA muss aktiv sein)
 
 ---
@@ -104,7 +105,7 @@ Mit dem gesetzten Token einloggen.
 | **Gmail / GMX App-Passwörter** | Fernet (AES-128-CBC + HMAC-SHA256) verschlüsselt in `users.json`. Werden nur kurz im Speicher entschlüsselt, wenn die `.mbsyncrc` generiert wird. |
 | **Config-Dateien** | `users.json`, `passwd`, `*.mbsyncrc` → Dateirechte `0600` |
 | **GUI-Zugang** | Token-Auth (GUI_TOKEN). Ohne Token ist die GUI offen – in Produktion **immer setzen**. |
-| **Transport** | IMAPS (993) + STARTTLS (143), TLS ≥ 1.2, moderne Cipher |
+| **Transport** | IMAPS (993) + STARTTLS/Plain IMAP (143), TLS ≥ 1.2 für TLS-Verbindungen |
 | **Master-Key** | Entweder per `MASTER_KEY`-Env oder persistent in `data/master.key` (0600) |
 
 ### Was du zusätzlich tun solltest
@@ -113,6 +114,7 @@ Mit dem gesetzten Token einloggen.
 2. **GUI nicht ins Internet** freigeben (oder nur hinter Reverse-Proxy + Auth / VPN).
 3. Regelmäßig `GUI_TOKEN` und ggf. `MASTER_KEY` rotieren (bei Key-Wechsel müssen Provider-Konten neu hinterlegt werden).
 4. Dateirechte der Deploy-Ordner prüfen: nur der Docker-User und root sollten schreiben können.
+5. Plain IMAP auf Port 143 nur im vertrauenswürdigen LAN/VPN nutzen und den Port nicht ins Internet weiterleiten. Bei Plain IMAP werden Benutzername und Passwort unverschlüsselt übertragen.
 
 ### Was bewusst **nicht** drin ist
 
@@ -141,9 +143,10 @@ Mit dem gesetzten Token einloggen.
    In der Benutzerzeile unter „Passwort ändern“ möglich – neuer bcrypt-Hash wird sofort geschrieben.
 
 5. **Mail-App konfigurieren**  
-   - IMAP-Server: IP der Synology  
-   - Port: 993 (SSL/TLS)  
-   - Benutzername / Passwort: die lokalen Daten aus der GUI  
+   - IMAP-Server: IP der Synology
+   - Port: 143 und TLS/SSL deaktiviert, wenn die Mail-App kein TLS unterstützt (nur LAN/VPN)
+   - Alternativ: Port 993 mit SSL/TLS für normale Mail-Clients
+   - Benutzername / Passwort: die lokalen Daten aus der GUI
    - SMTP: am besten **direkt den Provider** verwenden (smtp.gmail.com bzw. mail.gmx.net)
 
 ---

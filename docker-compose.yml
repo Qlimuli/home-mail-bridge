@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
     hostname: mail
     ports:
-      - "143:143"     # IMAP (STARTTLS)
+      - "143:143"     # IMAP (Plain/STARTTLS – für inkompatible Clients)
       - "993:993"     # IMAPS
       - "110:110"     # POP3 (optional)
       - "995:995"     # POP3S
