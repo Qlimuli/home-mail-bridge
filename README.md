@@ -17,8 +17,8 @@
 
 - Synology DSM 7.x mit **Container Manager** (Docker)
 - User-Home-Service aktiviert (Control Panel → Benutzer & Gruppe → Erweitert)
-- Ports 143/993 (IMAP) und optional 110/995 (POP3) sowie 18880 (GUI) freigeben
-- Falls DSM oder der Synology Mail Server diese Ports bereits verwendet, in `.env` freie Host-Ports setzen, z. B. `IMAP_PORT=10143` und `IMAPS_PORT=10993`. Die rechte Seite der Portzuordnung bleibt unverändert.
+- Ports 143/993 (IMAP) sowie 18880 (GUI) freigeben. POP3/POP3S werden standardmäßig nicht veröffentlicht, damit es keinen Konflikt mit DSM-Port 995 gibt.
+- Falls DSM oder der Synology Mail Server auch IMAP-Ports verwendet, in `.env` freie Host-Ports setzen, z. B. `IMAP_PORT=10143` und `IMAPS_PORT=10993`. Die rechte Seite der Portzuordnung bleibt unverändert.
 - Für die K8s-Mail-App ohne TLS: den konfigurierten IMAP-Host-Port verwenden und TLS/SSL deaktivieren. Port 143 akzeptiert Plain IMAP sowie STARTTLS; Port 993 bleibt für TLS-Clients verfügbar.
 - Für Gmail: App-Passwort (2FA muss aktiv sein)
 
@@ -71,8 +71,6 @@ SYNC_INTERVAL=300
 # Nur nötig, wenn DSM/Mail Server die Standard-Ports bereits belegt:
 # IMAP_PORT=10143
 # IMAPS_PORT=10993
-# POP3_PORT=10110
-# POP3S_PORT=10995
 ```
 
 - **GUI_TOKEN**: Pflicht für Produktion – schützt die Web-Oberfläche
