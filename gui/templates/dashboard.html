@@ -155,7 +155,7 @@
     In Thunderbird, Apple Mail, Outlook, Android/iOS Mail usw. einfach ein neues IMAP-Konto anlegen:
   </p>
   <ul class="muted" style="padding-left:1.25rem">
-    <li><strong>IMAP-Server:</strong> IP oder Hostname deiner Synology (Port 993, SSL/TLS)</li>
+    <li><strong>IMAP-Server:</strong> IP oder Hostname deiner Synology (Port {{ imaps_port }}, SSL/TLS{% if imaps_port != 993 %} – nicht 993, weil DSM diesen Port belegt{% endif %})</li>
     <li><strong>Benutzername:</strong> der lokale Benutzername von oben</li>
     <li><strong>Passwort:</strong> das hier vergebene Passwort</li>
     <li><strong>SMTP:</strong> am besten direkt den Provider nutzen (smtp.gmail.com / mail.gmx.net) – spart Ressourcen auf dem NAS</li>

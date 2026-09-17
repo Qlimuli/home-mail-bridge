@@ -73,11 +73,13 @@ services:
     environment:
       - TZ=Europe/Berlin
       - GUI_PORT=18880
-      # === SICHERHEIT – unbedingt setzen ===
-      - GUI_TOKEN=                  # Langer zufälliger Token (mind. 32 Zeichen) – Pflicht für Produktion
-      - GUI_SECRET=                 # Optional: fester Session-Key (sonst wird einer generiert)
-      - MASTER_KEY=                 # Optional: 64-Zeichen-Hex (32 Byte) für Fernet. Leer = auto in data/master.key
+      # === SICHERHEIT – unbedingt setzen (Werte aus .env) ===
+      - GUI_TOKEN=${GUI_TOKEN:-}
+      - GUI_SECRET=${GUI_SECRET:-}
+      - MASTER_KEY=${MASTER_KEY:-}
       - HOMES_BASE=/homes
+      - IMAP_PORT=${IMAP_PORT:-143}
+      - IMAPS_PORT=${IMAPS_PORT:-993}
       - DOVECOT_CONTAINER=home-mail-dovecot
       - SYNC_CONTAINER=home-mail-sync
     mem_limit: 96m                 # etwas höher wegen cryptography

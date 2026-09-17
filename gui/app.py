@@ -394,6 +394,8 @@ def dashboard():
         sync_status=sync,
         homes_base=str(HOMES_BASE),
         providers=PROVIDERS,
+        imap_port=int(os.environ.get("IMAP_PORT", "143")),
+        imaps_port=int(os.environ.get("IMAPS_PORT", "993")),
     )
 
 
